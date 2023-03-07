@@ -1,0 +1,1 @@
+symlink_files_to_current_binary_dir()

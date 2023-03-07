@@ -1,0 +1,3 @@
+# Udev rules file for dht22 device driver.
+# To be put in /etc/udev/rules.d/
+SUBSYSTEM=="dht22", KERNEL=="dht22", MODE="0444"

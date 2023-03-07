@@ -1,0 +1,2 @@
+obj-m += dht22.o
+dht22-y += 
