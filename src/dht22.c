@@ -37,11 +37,11 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
-#include <linux/bug.h>
+#include <linux/bug.h> 
 
 
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.1");
 MODULE_AUTHOR("Jakob Hofer <jakob.refoh@gmail.com>");
 MODULE_DESCRIPTION("Character device driver for dht22 sensor");
 
@@ -56,18 +56,6 @@ MODULE_DESCRIPTION("Character device driver for dht22 sensor");
 #endif
 
 #define pr_fmt(fmt) DHT22_MODULE_NAME ": " fmt
-
-
-/**
- * Workaround 'unknown register name "r2"':
- * Issue: <https://github.com/microsoft/vscode-cpptools/issues/4382> 
- * Intellisense has its problems with recognizing arm registers.
- * NOTE: This re-define doesn't change the logic seen by the compiler.
- */
-#if defined(__INTELLISENSE__)
-    #undef put_user
-    #define put_user(x, ptr) (-1)
-#endif
 
 
 static int irq_number;
@@ -108,35 +96,35 @@ static struct
     ktime_t last_read;
 } dht22_sensor;
 
-static DEFINE_MUTEX(dht22_sensor_mutex);
+static DEFINE_MUTEX(dht22_mutex);
 
 
-#if defined(DEBUG)
+static int dht22_open(struct inode* inode, struct file* filp);
+static int dht22_release(struct inode* inode, struct file* filp);
+static ssize_t dht22_read(struct file* filp, char __user*  buf, size_t nbytes, loff_t* offp);
+static loff_t dht22_llseek(struct file *filp, loff_t off, int whence);
+
+
+#if defined (DEBUG)
     static void print_timing_info(void);
-
-    #define DEBUG_PRINT_TIMING_INFO() print_timing_info()
+    #define DEBUG_PRINT_TIMING_INFO() ({ print_timing_info(); })
     #define DEBUG_STORE_PULSE_WIDTH(now) \
     ({ \
         if (dht22_detail.num_edges && (dht22_detail.num_edges <= 42)) \
             dht22_detail.diffs[dht22_detail.num_edges - 1] = ktime_to_us(now - dht22_detail.last_edge); \
     })
-
 #else
     #define DEBUG_PRINT_TIMING_INFO() {}
     #define DEBUG_STORE_PULSE_WIDTH(now) {}
 #endif
 
 
-static int dht22_open(struct inode* inode, struct file* filp);
-static int dht22_release(struct inode* inode, struct file* filp);
-static ssize_t dht22_read(struct file* filp, char __user*  buf, size_t nbytes, loff_t* off);
-
-
 static struct file_operations const dht22_fops = {
     .owner = THIS_MODULE,
     .open = dht22_open,
     .release = dht22_release,
-    .read = dht22_read
+    .read = dht22_read,
+    .llseek = dht22_llseek
 };
 
 
@@ -202,16 +190,16 @@ static int _decode_sensor_data(void)
 }
 
 
-static ssize_t _copy_data_to_user(char __user* buf, size_t nbytes)
+static ssize_t _copy_data_to_user(int16_t humidity, int16_t temperature, char __user* buf, size_t nbytes, loff_t* offp)
 {
     char private_buf[16]; 
     char* ptr = &private_buf[0];
     ssize_t bytes_read = 0;
     int err = 0;
 
-    snprintf(private_buf, 13, "%d.%d,%d.%d",
-        dht22_sensor.humidity / 10, dht22_sensor.humidity % 10,
-        dht22_sensor.temperature / 10, dht22_sensor.temperature % 10
+    snprintf(private_buf, 16, "%d.%d,%d.%d",
+        humidity / 10, humidity % 10,
+        temperature / 10, temperature % 10
     );
 
     pr_debug("Data to user: %s\n", private_buf);
@@ -224,25 +212,26 @@ static ssize_t _copy_data_to_user(char __user* buf, size_t nbytes)
         ++bytes_read;
     }
 
+    *offp = bytes_read;
     return bytes_read;
 }
 
 
-static ssize_t dht22_read(struct file* filp, char __user* buf, size_t nbytes, loff_t* off)
-{	
+static int _try_poll_sensor(void)
+{
     ktime_t const now = ktime_get();
     int64_t diff;
     int err = 0;
-
+    
     diff = ktime_to_ms(now - dht22_sensor.last_read);
 
     if ((diff < 2000) && (dht22_sensor.last_read > 0LL))
     {	
-        pr_debug("Re-read sensor too soon (within 2 seconds)\n");
+        pr_debug("Re-read sensor within 2 seconds\n");
         return 0;
     }
 
-    pr_debug("Read sensor\n");
+    pr_debug("Poll sensor\n");
 
     _clear_dht22_detail();
 
@@ -256,15 +245,38 @@ static ssize_t dht22_read(struct file* filp, char __user* buf, size_t nbytes, lo
     err = _decode_sensor_data();
     if (err < 0) return err;
 
-    /* Set timestamp of last read to now only after a successful read */
-    dht22_sensor.last_read = now;
-    return _copy_data_to_user(buf, nbytes);
+    /* Store timestamp only after a successful read */
+    dht22_sensor.last_read = ktime_get();
+    return 0;
+}
+
+
+static ssize_t dht22_read(struct file* filp, char __user* buf, size_t nbytes, loff_t* offp)
+{	
+    int16_t humidity = 0;
+    int16_t temperature = 0;
+    int err = 0;
+
+    if (filp->f_pos > 0) return 0;
+    mutex_lock(&dht22_mutex);
+
+    err = _try_poll_sensor();
+    if (err < 0) 
+    {
+        mutex_unlock(&dht22_mutex);
+        return err;
+    }
+
+    humidity = dht22_sensor.humidity;
+    temperature = dht22_sensor.temperature;
+
+    mutex_unlock(&dht22_mutex);
+    return _copy_data_to_user(humidity, temperature, buf, nbytes, offp);
 }
 
 
 static int dht22_open(struct inode* inode, struct file* filp)
 {
-    if (mutex_trylock(&dht22_sensor_mutex) == 0) return -EBUSY;
     pr_debug("Device opened\n");
     return 0;
 }
@@ -272,9 +284,28 @@ static int dht22_open(struct inode* inode, struct file* filp)
 
 static int dht22_release(struct inode* inode, struct file* filp)
 {
-    mutex_unlock(&dht22_sensor_mutex);
     pr_debug("Device closed\n");
     return 0;
+}
+
+
+static loff_t dht22_llseek(struct file *filp, loff_t off, int whence)
+{   
+    loff_t new_pos = 0;
+
+    switch(whence) 
+    {
+        case SEEK_SET: 
+            new_pos = off;
+            break;
+
+        default: 
+            return -EINVAL;
+    }
+
+    if (new_pos < 0) return -EINVAL;
+    filp->f_pos = new_pos;
+    return new_pos; 
 }
 
 

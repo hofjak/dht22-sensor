@@ -9,3 +9,5 @@ foreach(currentFile ${EXAMPLES_SOURCES})
     add_executable(${currentName} ${currentFile})
 endforeach(currentFile)
 
+
+target_link_libraries(ex2 pthread)

@@ -1,6 +1,5 @@
-<a id="Top"></a>
+# DHT22 driver for Raspberry Pi OS <a id="Top"></a>
 
-# DHT22 driver for Raspberry Pi OS
 
 [![Contributors](https://img.shields.io/github/contributors/hofjak/dht22-sensor)](https://github.com/hofjak/dht22-sensor)
 [![Forks](https://img.shields.io/github/forks/hofjak/dht22-sensor)](https://github.com/hofjak/dht22-sensor)
@@ -21,7 +20,7 @@ It is not by any means supposed to be a production-grade solution.
 * [Description](#Description)
 * [Build](#Build)
 * [Installation](#Installation)
-* [Example program](#Example-program)
+* [Example programs](#Example-programs)
 * [Implementation](#Implementation)
 * [Credits and inspiration](#Credits-and-Inspiration)
 * [License](#License)
@@ -30,20 +29,24 @@ It is not by any means supposed to be a production-grade solution.
 
 ## Description
 
-This module adds the device file `/dev/dht22` to the system and to keep it simple, it can only be opened by one
-process at a time. To retrieve the basic sensor output run `cat`.
+This module adds the device file `/dev/dht22` to the system. 
+A successful read returns a character string with two comma-separated decimal numbers e.g.
+`"45.6,23.4"`. The first value represents the relative humidity as a percentage and the second value represents 
+the temperature in degrees Celsius. You can read the raw output with `cat`.
 
-```bash 
+```bash
 cat /dev/dht22
 ```
 
-A successful read returns a character string with two comma-separated decimal numbers e.g.
-`"45.6,23.4"`. The first value represents the relative humidity as a percentage and the second value represents 
-the temperature in degrees Celsius. There will be at most 13 ASCII characters 
+There will be at most 13 ASCII characters 
 (8 digits, 2 decimal points, 1 comma and 1 minus sign) inside the returned string. Note that
 the terminating null-byte is not included.
-If the read fails or another error occurs, `errno` is set, and the return value is `-1`. The different error codes
-are described [here](#Error-codes).
+If the read fails or another error occurs, `errno` is set, and the return value is `-1`. 
+The different error codes are described [here](#Error-codes).
+
+If you want to read the sensor again without closing it, use `lseek` and seek back 
+to the beginning of the device file. If you read again without seeking back, the return value will be `0`.
+An example can be found in `examples/ex2.c`.
 
 By default, GPIO-pin 4 is used for data transmission. 
 If you want to use a different pin you can specify the `gpio_pin` module parameter when inserting the module
@@ -55,12 +58,7 @@ into the kernel.
 
 To build the module first clone the repository and navigate into the 
 `dht22-sensor` directory.
-
-```bash
-git clone https://github.com/hofjak/dht22-sensor.git && cd dht22-sensor
-```
-
-For demonstration purposes I use the `build` folder inside the project source directory to build the module. 
+For demonstration purposes, I use the `build` folder inside the project source directory to build the module. 
 But I strongly recommend using a TMPFS, especially to build larger projects.
 
 ```bash
@@ -141,10 +139,10 @@ sudo cp 42-dht22.rules /etc/udev/rules.d
 ```
 
 
-## Example program
+## Example programs
 
-For a more exhaustive usage demonstration have a look at the provided example program `examples/example.c`.
-To build it, configure CMake and run:
+For a more exhaustive usage demonstration have a look at the provided example programs `examples/*.c`.
+To build them, configure CMake and run:
 
 ```bash
 make -C build build-examples
@@ -153,28 +151,33 @@ make -C build build-examples
 
 ## Implementation
 
-Initially, the GPIO pin for the data transmission is pulled high. After the two-pulse handshake sequence to 
-trigger a read (1 host and 1 slave) the sensor generates 40 pulses which encode the data. 
+Initially, the GPIO pin for the data transmission is pulled high. After the two-pulse handshake sequence 
+triggers a read (1 host and 1 slave), the sensor generates 40 pulses which encode the data. 
 Every new bit starts with a 50µs low pulse and a following high pulse. 
 The length of the high pulse determines whether the transferred bit is a 0 or a 1. 
-According to the datasheet a length of around 26µs to 28µs encodes a 0 and a length of 70µs encodes a 1.
+According to the datasheet, a length of around 26µs to 28µs encodes a 0 and a length of 70µs encodes a 1.
 
-I use an interrupt handler that triggers on every falling edge to measure the pulse width.
+To measure the pulse width, I use an interrupt handler that is triggered on a falling edge.
 Thus, only the time between the 50µs low pulses can be measured. I found 110µs to be a good 
 decision boundary between reading a 0 or a 1. If you want to look into the timing yourself you can build 
 the module using the CMake debug configuration. Measured pulse widths and other debug information will be 
 printed to the kernel message buffer. You can read it running `dmesg`.
+
+Based on the information provided in the datasheet, it is recommended to wait for a minimum of 2 
+seconds after the previous poll before polling the sensor again. Therefore, a `read` operation will only 
+trigger the sensor if at least 2 seconds have passed since the last read. 
+Otherwise, the data from the previous read will be returned.
 
 Check out the full dht22 datasheet 
 [here](https://cdn-shop.adafruit.com/datasheets/Digital+humidity+and+temperature+sensor+AM2302.pdf).
 
 <center> <a id="Error-codes"></a> 
 
-| Error codes | Reason                                      |
-| :---------- | :------------------------------------------ |
-| `EBUSY`     | Someone else is already using the device    |
-| `EIO`       | Triggering sensor failed - GPIO error       |
-| `ERANGE`    | Checksum invalid - Faulty sensor read       |
+| Error Code  | Reason                                       |
+| :---------- | :------------------------------------------- |
+| `EIO`       | Triggering sensor failed - GPIO error        |
+| `ERANGE`    | Checksum invalid - Faulty sensor read        |
+| `EINVAL`    | `lseek` called with invalid parameters       |
 
 </center>
 
